@@ -14,6 +14,10 @@ def main():
 
     filename = 'vaccine-booking-details.json'
     mobile = None
+
+    print('Running Script')
+    beep(500, 150)
+
     try:
         base_request_header = {
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.2171.95 Safari/537.36',
@@ -31,6 +35,7 @@ def main():
         if os.path.exists(filename):
             print("\n=================================== Note ===================================\n")
             print(f"Info from perhaps a previous run already exists in {filename} in this directory.")
+            print(f"IMPORTANT: If this is your first time running this version of the application, DO NOT USE THE FILE!")
             try_file = input("Would you like to see the details and confirm to proceed? (y/n Default y): ")
             try_file = try_file if try_file else 'y'
 
@@ -68,7 +73,8 @@ def main():
                                          ref_freq=info.refresh_freq,
                                          auto_book=info.auto_book,
                                          start_date=info.start_date,
-                                         vaccine_type=info.vaccine_type)
+                                         vaccine_type=info.vaccine_type,
+                                         fee_type=info.fee_type)
 
             # check if token is still valid
             beneficiaries_list = requests.get(BENEFICIARIES_URL, headers=request_header)

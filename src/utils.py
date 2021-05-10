@@ -3,12 +3,18 @@ from hashlib import sha256
 from collections import Counter
 from inputimeout import inputimeout, TimeoutOccurred
 import tabulate, copy, time, datetime, requests, sys, os, random
+from captcha import captcha_builder
 
 BOOKING_URL = "https://cdn-api.co-vin.in/api/v2/appointment/schedule"
 BENEFICIARIES_URL = "https://cdn-api.co-vin.in/api/v2/appointment/beneficiaries"
 CALENDAR_URL_DISTRICT = "https://cdn-api.co-vin.in/api/v2/appointment/sessions/calendarByDistrict?district_id={0}&date={1}"
 CALENDAR_URL_PINCODE = "https://cdn-api.co-vin.in/api/v2/appointment/sessions/calendarByPin?pincode={0}&date={1}"
+CAPTCHA_URL = "https://cdn-api.co-vin.in/api/v2/auth/getRecaptcha"
+OTP_PUBLIC_URL = 'https://cdn-api.co-vin.in/api/v2/auth/public/generateOTP'
+OTP_PRO_URL = 'https://cdn-api.co-vin.in/api/v2/auth/generateMobileOTP'
+
 WARNING_BEEP_DURATION = (1000, 2000)
+
 
 try:
     import winsound
@@ -16,22 +22,31 @@ try:
 except ImportError:
     import os
 
-    def beep(freq, duration):
-        # apt-get install beep  --> install beep package on linux distros before running
-        os.system('beep -f %s -l %s' % (freq, duration))
+    if sys.platform == "darwin":
+
+        def beep(freq, duration):
+            # brew install SoX --> install SOund eXchange universal sound sample translator on mac
+            os.system(
+                f"play -n synth {duration/1000} sin {freq} >/dev/null 2>&1")
+    else:
+
+        def beep(freq, duration):
+            # apt-get install beep  --> install beep package on linux distros before running
+            os.system('beep -f %s -l %s' % (freq, duration))
 
 else:
     def beep(freq, duration):
         winsound.Beep(freq, duration)
 
 
-def viable_options(resp, minimum_slots, min_age_booking):
+def viable_options(resp, minimum_slots, min_age_booking, fee_type):
     options = []
     if len(resp['centers']) >= 0:
         for center in resp['centers']:
             for session in center['sessions']:
                 if (session['available_capacity'] >= minimum_slots) \
-                        and (session['min_age_limit'] <= min_age_booking):
+                        and (session['min_age_limit'] <= min_age_booking)\
+                        and (center['fee_type'] in fee_type):
                     out = {
                         'name': center['name'],
                         'district': center['district_name'],
@@ -67,15 +82,13 @@ def display_table(dict_list):
 def display_info_dict(details):
     for key, value in details.items():
         if isinstance(value, list):
-            print(f"{key}\t:")
             if all(isinstance(item, dict) for item in value):
+                print(f"\t{key}:")
                 display_table(value)
             else:
-                for idx, item in enumerate(value):
-                    print(f"\t\t\t  Entry #{idx + 1}: {item}")
-
+                print(f"\t{key}\t: {value}")
         else:
-            print(f"{key}\t: {value}")
+            print(f"\t{key}\t: {value}")
 
 
 def confirm_and_proceed(collected_details):
@@ -127,7 +140,7 @@ def collect_user_details(request_header):
         os.system("pause")
         sys.exit(1)
 
-    vaccine_type = vaccine_types[0]
+    vaccine_type = vaccine_types[0] # if all([beneficiary['status'] == 'Partially Vaccinated' for beneficiary in beneficiary_dtls]) else None
     if not vaccine_type:
         print("\n================================= Vaccine Info =================================\n")
         vaccine_type = get_vaccine_preference()
@@ -165,7 +178,7 @@ def collect_user_details(request_header):
 
     # Get search start date
     start_date = input(
-        'Search for next seven day starting from when?\nUse 1 for today, 2 for tomorrow, or provide a date in the format yyyy-mm-dd. Default 2: ')
+        '\nSearch for next seven day starting from when?\nUse 1 for today, 2 for tomorrow, or provide a date in the format yyyy-mm-dd. Default 2: ')
     if not start_date:
         start_date = 2
     elif start_date in ['1', '2']:
@@ -176,9 +189,12 @@ def collect_user_details(request_header):
         except ValueError:
             start_date = 2
 
+    # Get preference of Free/Paid option
+    fee_type = get_fee_type_preference()
+
     print("\n=========== CAUTION! =========== CAUTION! CAUTION! =============== CAUTION! =======\n")
     print("===== BE CAREFUL WITH THIS OPTION! AUTO-BOOKING WILL BOOK THE FIRST AVAILABLE CENTRE, DATE, AND A RANDOM SLOT! =====")
-    auto_book = input("Do you want to enable auto-booking? (yes-please or no): ")
+    auto_book = input("Do you want to enable auto-booking? (yes-please or no) Default no: ")
     auto_book = 'no' if not auto_book else auto_book
 
     collected_details = {
@@ -189,13 +205,14 @@ def collect_user_details(request_header):
         'refresh_freq': refresh_freq,
         'auto_book': auto_book,
         'start_date': start_date,
-        'vaccine_type': vaccine_type
+        'vaccine_type': vaccine_type,
+        'fee_type': fee_type
     }
 
     return collected_details
 
 
-def check_calendar_by_district(request_header, vaccine_type, location_dtls, start_date, minimum_slots, min_age_booking):
+def check_calendar_by_district(request_header, vaccine_type, location_dtls, start_date, minimum_slots, min_age_booking, fee_type):
     """
     This function
         1. Takes details required to check vaccination calendar
@@ -223,7 +240,7 @@ def check_calendar_by_district(request_header, vaccine_type, location_dtls, star
                 resp = resp.json()
                 if 'centers' in resp:
                     print(f"Centers available in {location['district_name']} from {start_date} as of {today.strftime('%Y-%m-%d %H:%M:%S')}: {len(resp['centers'])}")
-                    options += viable_options(resp, minimum_slots, min_age_booking)
+                    options += viable_options(resp, minimum_slots, min_age_booking, fee_type)
 
             else:
                 pass
@@ -239,7 +256,7 @@ def check_calendar_by_district(request_header, vaccine_type, location_dtls, star
         beep(WARNING_BEEP_DURATION[0], WARNING_BEEP_DURATION[1])
 
 
-def check_calendar_by_pincode(request_header, vaccine_type, location_dtls, start_date, minimum_slots, min_age_booking):
+def check_calendar_by_pincode(request_header, vaccine_type, location_dtls, start_date, minimum_slots, min_age_booking, fee_type):
     """
     This function
         1. Takes details required to check vaccination calendar
@@ -267,7 +284,7 @@ def check_calendar_by_pincode(request_header, vaccine_type, location_dtls, start
                 resp = resp.json()
                 if 'centers' in resp:
                     print(f"Centers available in {location['pincode']} from {start_date} as of {today.strftime('%Y-%m-%d %H:%M:%S')}: {len(resp['centers'])}")
-                    options += viable_options(resp, minimum_slots, min_age_booking)
+                    options += viable_options(resp, minimum_slots, min_age_booking, fee_type)
 
             else:
                 pass
@@ -284,6 +301,15 @@ def check_calendar_by_pincode(request_header, vaccine_type, location_dtls, start
         beep(WARNING_BEEP_DURATION[0], WARNING_BEEP_DURATION[1])
 
 
+def generate_captcha(request_header):
+    print('================================= GETTING CAPTCHA ==================================================')
+    resp = requests.post(CAPTCHA_URL, headers=request_header)
+    print(f'Captcha Response Code: {resp.status_code}')
+
+    if resp.status_code == 200:
+        return captcha_builder(resp.json())
+
+
 def book_appointment(request_header, details):
     """
     This function
@@ -292,26 +318,38 @@ def book_appointment(request_header, details):
         3. Returns True or False depending on Token Validity
     """
     try:
-        print('================================= ATTEMPTING BOOKING ==================================================')
+        valid_captcha = True
+        while valid_captcha:
+            captcha = generate_captcha(request_header)
+            details['captcha'] = captcha
 
-        resp = requests.post(BOOKING_URL, headers=request_header, json=details)
-        print(f'Booking Response Code: {resp.status_code}')
-        print(f'Booking Response : {resp.text}')
+            print('================================= ATTEMPTING BOOKING ==================================================')
 
-        if resp.status_code == 401:
-            print('TOKEN INVALID')
-            return False
+            resp = requests.post(BOOKING_URL, headers=request_header, json=details)
+            print(f'Booking Response Code: {resp.status_code}')
+            print(f'Booking Response : {resp.text}')
 
-        elif resp.status_code == 200:
-            beep(WARNING_BEEP_DURATION[0], WARNING_BEEP_DURATION[1])
-            print('##############    BOOKED!  ##############')
-            os.system("pause")
-            sys.exit()
+            if resp.status_code == 401:
+                print('TOKEN INVALID')
+                return False
 
-        else:
-            print(f'Response: {resp.status_code} : {resp.text}')
-            os.system("pause")
-            return True
+            elif resp.status_code == 200:
+                beep(WARNING_BEEP_DURATION[0], WARNING_BEEP_DURATION[1])
+                print('##############    BOOKED!  ############################    BOOKED!  ##############')
+                print("                        Hey, Hey, Hey! It's your lucky day!                       ")
+                print('\nPress any key thrice to exit program.')
+                os.system("pause")
+                os.system("pause")
+                os.system("pause")
+                sys.exit()
+
+            elif resp.status_code == 400:
+                print(f'Response: {resp.status_code} : {resp.text}')
+                pass
+
+            else:
+                print(f'Response: {resp.status_code} : {resp.text}')
+                return True
 
     except Exception as e:
         print(str(e))
@@ -335,6 +373,7 @@ def check_and_book(request_header, beneficiary_dtls, location_dtls, search_optio
         auto_book = kwargs['auto_book']
         start_date = kwargs['start_date']
         vaccine_type = kwargs['vaccine_type']
+        fee_type = kwargs['fee_type']
 
         if isinstance(start_date, int) and start_date == 2:
             start_date = (datetime.datetime.today() + datetime.timedelta(days=1)).strftime("%d-%m-%Y")
@@ -344,9 +383,11 @@ def check_and_book(request_header, beneficiary_dtls, location_dtls, search_optio
             pass
 
         if search_option == 2:
-            options = check_calendar_by_district(request_header, vaccine_type, location_dtls, start_date, minimum_slots, min_age_booking)
+            options = check_calendar_by_district(request_header, vaccine_type, location_dtls, start_date,
+                                                 minimum_slots, min_age_booking, fee_type)
         else:
-            options = check_calendar_by_pincode(request_header, vaccine_type, location_dtls, start_date, minimum_slots, min_age_booking)
+            options = check_calendar_by_pincode(request_header, vaccine_type, location_dtls, start_date,
+                                                minimum_slots, min_age_booking, fee_type)
 
         if isinstance(options, bool):
             return False
@@ -427,9 +468,22 @@ def get_vaccine_preference():
         return None
 
 
+def get_fee_type_preference():
+    print("\nDo you have a fee type preference?")
+    preference = input("Enter 0 for No Preference, 1 for Free Only, or 2 for Paid Only. Default 0 : ")
+    preference = int(preference) if preference and int(preference) in [0, 1, 2] else 0
+
+    if preference == 1:
+        return ['Free']
+    elif preference == 2:
+        return ['Paid']
+    else:
+        return ['Free', 'Paid']
+
+
 def get_pincodes():
     locations = []
-    pincodes = input("Enter all the pincodes you are interested separated by commas: ")
+    pincodes = input("Enter comma separated pincodes to monitor: ")
     for idx, pincode in enumerate(pincodes.split(',')):
         pincode = {
             'pincode': pincode,
@@ -457,43 +511,43 @@ def get_districts(request_header):
             refined_states.append(tmp)
 
         display_table(refined_states)
-
-        state = int(input('Enter State index: '))
+        state = int(input('\nEnter State index: '))
         state_id = states[state - 1]['state_id']
+
+        districts = requests.get(f'https://cdn-api.co-vin.in/api/v2/admin/location/districts/{state_id}', headers=request_header)
+
+        if districts.status_code == 200:
+            districts = districts.json()['districts']
+
+            refined_districts = []
+            for district in districts:
+                tmp = {'district': district['district_name']}
+                refined_districts.append(tmp)
+
+            display_table(refined_districts)
+            reqd_districts = input('\nEnter comma separated index numbers of districts to monitor : ')
+            districts_idx = [int(idx) - 1 for idx in reqd_districts.split(',')]
+            reqd_districts = [{
+                'district_id': item['district_id'],
+                'district_name': item['district_name'],
+                'alert_freq': 440 + ((2 * idx) * 110)
+            } for idx, item in enumerate(districts) if idx in districts_idx]
+
+            print(f'Selected districts: ')
+            display_table(reqd_districts)
+            return reqd_districts
+
+        else:
+            print('Unable to fetch districts')
+            print(districts.status_code)
+            print(districts.text)
+            os.system("pause")
+            sys.exit(1)
 
     else:
         print('Unable to fetch states')
         print(states.status_code)
         print(states.text)
-        os.system("pause")
-        sys.exit(1)
-
-    districts = requests.get(f'https://cdn-api.co-vin.in/api/v2/admin/location/districts/{state_id}', headers=request_header)
-    if districts.status_code == 200:
-        districts = districts.json()['districts']
-
-        refined_districts = []
-        for district in districts:
-            tmp = {'district': district['district_name']}
-            refined_districts.append(tmp)
-
-        display_table(refined_districts)
-        reqd_districts = input('Enter comma separated index numbers of districts to monitor : ')
-        districts_idx = [int(idx) - 1 for idx in reqd_districts.split(',')]
-        reqd_districts = [{
-            'district_id': item['district_id'],
-            'district_name': item['district_name'],
-            'alert_freq': 440 + ((2 * idx) * 110)
-        } for idx, item in enumerate(districts) if idx in districts_idx]
-
-        print(f'Selected districts: ')
-        display_table(reqd_districts)
-        return reqd_districts
-
-    else:
-        print('Unable to fetch districts')
-        print(districts.status_code)
-        print(districts.text)
         os.system("pause")
         sys.exit(1)
 
@@ -573,33 +627,58 @@ def generate_token_OTP(mobile, request_header):
     """
     This function generate OTP and returns a new token
     """
-    data = {"mobile": mobile,
-            "secret": "U2FsdGVkX1+z/4Nr9nta+2DrVJSv7KS6VoQUSQ1ZXYDx/CJUkWxFYG6P3iM/VW+6jLQ9RDQVzp/RcZ8kbT41xw=="}
-    print(f"Requesting OTP with mobile number {mobile}..")
-    txnId = requests.post(url='https://cdn-api.co-vin.in/api/v2/auth/generateMobileOTP', json=data, headers=request_header)
 
-    if txnId.status_code == 200:
-        txnId = txnId.json()['txnId']
-
-        OTP = input("Enter OTP: ")
-        data = {"otp": sha256(str(OTP).encode('utf-8')).hexdigest(), "txnId": txnId}
-        print(f"Validating OTP..")
-
-        token = requests.post(url='https://cdn-api.co-vin.in/api/v2/auth/validateMobileOtp', json=data,
-                              headers=request_header)
-        if token.status_code == 200:
-            token = token.json()['token']
-        else:
-            print('Unable to Validate OTP')
-            print(token.text)
-            os.system("pause")
-            sys.exit()
-
-        print(f'Token Generated: {token}')
-        return token
-
-    else:
-        print('Unable to Create OTP')
-        print(txnId.text)
-        os.system("pause")
+    if not mobile:
+        print("Mobile number cannot be empty")
+        os.system('pause')
         sys.exit()
+
+    valid_token = False
+    while not valid_token:
+        try:
+            data = {"mobile": mobile,
+                    "secret": "U2FsdGVkX1+z/4Nr9nta+2DrVJSv7KS6VoQUSQ1ZXYDx/CJUkWxFYG6P3iM/VW+6jLQ9RDQVzp/RcZ8kbT41xw=="
+            }
+            txnId = requests.post(url=OTP_PRO_URL, json=data, headers=request_header)
+
+            if txnId.status_code == 200:
+                print(f"Successfully requested OTP for mobile number {mobile} at {datetime.datetime.today()}..")
+                txnId = txnId.json()['txnId']
+
+                OTP = input("Enter OTP (If this takes more than 2 minutes, press Enter to retry): ")
+                if OTP:
+                    data = {"otp": sha256(str(OTP).encode('utf-8')).hexdigest(), "txnId": txnId}
+                    print(f"Validating OTP..")
+
+                    token = requests.post(url='https://cdn-api.co-vin.in/api/v2/auth/validateMobileOtp', json=data,
+                                          headers=request_header)
+                    if token.status_code == 200:
+                        token = token.json()['token']
+                        print(f'Token Generated: {token}')
+                        valid_token = True
+                        return token
+
+                    else:
+                        print('Unable to Validate OTP')
+                        print(f"Response: {token.text}")
+
+                        retry = input(f"Retry with {mobile} ? (y/n Default y): ")
+                        retry = retry if retry else 'y'
+                        if retry == 'y':
+                            pass
+                        else:
+                            sys.exit()
+
+            else:
+                print('Unable to Generate OTP')
+                print(txnId.status_code, txnId.text)
+
+                retry = input(f"Retry with {mobile} ? (y/n Default y): ")
+                retry = retry if retry else 'y'
+                if retry == 'y':
+                    pass
+                else:
+                    sys.exit()
+
+        except Exception as e:
+            print(str(e))
